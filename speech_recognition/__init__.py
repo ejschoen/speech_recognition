@@ -1130,8 +1130,8 @@ class Recognizer(AudioSource):
         result = json.loads(response_text)
 
         # return results
-        print('result:')
-        pprint(result, indent=4)
+        #print('result:')
+        #pprint(result, indent=4)
         if show_all:
             return result
         if "RecognitionStatus" not in result or result["RecognitionStatus"] != "Success" or "NBest" not in result:
@@ -1314,8 +1314,8 @@ class Recognizer(AudioSource):
 
         # return results
         if show_all: return result
-        print('result:')
-        pprint(result, indent=4)
+        #print('result:')
+        #pprint(result, indent=4)
         if "Disambiguation" not in result or result["Disambiguation"] is None:
             raise UnknownValueError()
         return result['Disambiguation']['ChoiceData'][0]['Transcription'], result['Disambiguation']['ChoiceData'][0]['ConfidenceScore']
@@ -1404,8 +1404,8 @@ class Recognizer(AudioSource):
                     raise
             
             job = status['TranscriptionJob']
-            print('status0:')
-            pprint(status, indent=4)
+            #print('status0:')
+            #pprint(status, indent=4)
             if job['TranscriptionJobStatus'] in ['COMPLETED'] and 'TranscriptFileUri' in job['Transcript']:
 
                 # Retrieve transcription JSON containing transcript.
@@ -1413,8 +1413,8 @@ class Recognizer(AudioSource):
                 import urllib.request, json
                 with urllib.request.urlopen(transcript_uri) as json_data:
                     d = json.load(json_data)
-                    print('result:')
-                    pprint(d, indent=4)
+                    #print('result:')
+                    #pprint(d, indent=4)
                     confidences = []
                     for item in d['results']['items']:
                         confidences.append(float(item['alternatives'][0]['confidence']))
@@ -1604,8 +1604,8 @@ class Recognizer(AudioSource):
         # return results
         if show_all:
             return result
-        print('result:')
-        pprint(result, indent=4)
+        #print('result:')
+        #pprint(result, indent=4)
         if "results" not in result or len(result["results"]) < 1 or "alternatives" not in result["results"][0]:
             raise UnknownValueError()
 
@@ -1644,18 +1644,18 @@ class Recognizer(AudioSource):
             self.lasttfgraph = tensor_graph
 
             # load graph
-            with tf.gfile.FastGFile(tensor_graph, 'rb') as f:
-                graph_def = tf.GraphDef()
+            with tf.compat.v1.gfile.FastGFile(tensor_graph, 'rb') as f:
+                graph_def = tf.compat.v1.GraphDef()
                 graph_def.ParseFromString(f.read())
                 tf.import_graph_def(graph_def, name='')
             # load labels
-            self.tflabels = [line.rstrip() for line in tf.gfile.GFile(tensor_label)]
+            self.tflabels = [line.rstrip() for line in tf.compat.v1.gfile.GFile(tensor_label)]
 
         wav_data = audio_data.get_wav_data(
             convert_rate=16000, convert_width=2
         )
 
-        with tf.Session() as sess:
+        with tf.compat.v1.Session() as sess:
             input_layer_name = 'wav_data:0'
             output_layer_name = 'labels_softmax:0'
             softmax_tensor = sess.graph.get_tensor_by_name(output_layer_name)
