@@ -20,7 +20,17 @@ import hashlib
 import hmac
 import time
 import uuid
+import logging
 from pprint import pprint
+
+logger=logging.getLogger("speech_recognition")
+ch = logging.StreamHandler()
+ch.setLevel(logging.INFO)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# add formatter to ch
+ch.setFormatter(formatter)
+logger.addHandler(ch)
+logger.setLevel(logging.INFO)
 
 try:
     import requests
@@ -762,7 +772,7 @@ class Recognizer(AudioSource):
         listener_thread.start()
         return stopper
 
-    def recognize_sphinx(self, audio_data, language="en-US", keyword_entries=None, grammar=None, show_all=False):
+    def recognize_sphinx(self, audio_data, language="en-US", keyword_entries=None, grammar=None, show_all=False, debug=False):
         """
         Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using CMU Sphinx.
 
@@ -848,6 +858,8 @@ class Recognizer(AudioSource):
         decoder.process_raw(raw_data, False, True)  # process audio data with recognition enabled (no_search = False), as a full utterance (full_utt = True)
         decoder.end_utt()  # stop utterance processing
 
+        if debug:
+            pprint(decoder.hyp(), indent=4, stream=sys.stderr)
         if show_all: return decoder
 
         # return results
@@ -1039,28 +1051,20 @@ class Recognizer(AudioSource):
         if "_text" not in result or result["_text"] is None: raise UnknownValueError()
         return result["_text"]
 
-    def recognize_azure(self, audio_data, key, language="en-US", profanity="masked", location="westus", show_all=False):
-        """
-        Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using the Microsoft Azure Speech API.
+    def url_get(self, url, access_token=None, body=None, headers={}, method='GET', return_fn=lambda r: r.json()):
+        auth={"Authorization": "Bearer {}".format(access_token)} if access_token is not None else {}
+        if body is None:
+            r = requests.request(method, url, headers={**headers, **auth})
+        else:
+            r = requests.request(method, url, json=body, headers={**headers, **auth})
+        if r.status_code >= 400:
+            raise RequestError("Error from {}: {}".format(url, r.text))
+        return return_fn(r)
+        
 
-        The Microsoft Azure Speech API key is specified by ``key``. Unfortunately, these are not available without `signing up for an account <https://azure.microsoft.com/en-ca/pricing/details/cognitive-services/speech-api/>`__ with Microsoft Azure.
-
-        To get the API key, go to the `Microsoft Azure Portal Resources <https://portal.azure.com/>`__ page, go to "All Resources" > "Add" > "See All" > Search "Speech > "Create", and fill in the form to make a "Speech" resource. On the resulting page (which is also accessible from the "All Resources" page in the Azure Portal), go to the "Show Access Keys" page, which will have two API keys, either of which can be used for the `key` parameter. Microsoft Azure Speech API keys are 32-character lowercase hexadecimal strings.
-
-        The recognition language is determined by ``language``, a BCP-47 language tag like ``"en-US"`` (US English) or ``"fr-FR"`` (International French), defaulting to US English. A list of supported language values can be found in the `API documentation <https://docs.microsoft.com/en-us/azure/cognitive-services/speech/api-reference-rest/bingvoicerecognition#recognition-language>`__ under "Interactive and dictation mode".
-
-        Returns the most likely transcription if ``show_all`` is false (the default). Otherwise, returns the `raw API response <https://docs.microsoft.com/en-us/azure/cognitive-services/speech/api-reference-rest/bingvoicerecognition#sample-responses>`__ as a JSON dictionary.
-
-        Raises a ``speech_recognition.UnknownValueError`` exception if the speech is unintelligible. Raises a ``speech_recognition.RequestError`` exception if the speech recognition operation failed, if the key isn't valid, or if there is no internet connection.
-        """
-        assert isinstance(audio_data, AudioData), "Data must be audio data"
-        assert isinstance(key, str), "``key`` must be a string"
-        # assert isinstance(result_format, str), "``format`` must be a string" # simple|detailed
-        assert isinstance(language, str), "``language`` must be a string"
-
-        result_format = 'detailed'
+    def get_azure_access_token(self, key, location):
+        allow_caching=True
         access_token, expire_time = getattr(self, "azure_cached_access_token", None), getattr(self, "azure_cached_access_token_expiry", None)
-        allow_caching = True
         try:
             from time import monotonic  # we need monotonic time to avoid being affected by system clock changes, but this is only available in Python 3.3+
         except ImportError:
@@ -1070,6 +1074,7 @@ class Recognizer(AudioSource):
                 expire_time = None  # monotonic time not available, don't cache access tokens
                 allow_caching = False  # don't allow caching, since monotonic time isn't available
         if expire_time is None or monotonic() > expire_time:  # caching not enabled, first credential request, or the access token from the previous one expired
+            logger.info("Getting or refreshing access token")
             # get an access token using OAuth
             credential_url = "https://" + location + ".api.cognitive.microsoft.com/sts/v1.0/issueToken"
             credential_request = Request(credential_url, data=b"", headers={
@@ -1093,6 +1098,135 @@ class Recognizer(AudioSource):
                 # save the token for the duration it is valid for
                 self.azure_cached_access_token = access_token
                 self.azure_cached_access_token_expiry = start_time + 600  # according to https://docs.microsoft.com/en-us/azure/cognitive-services/Speech-Service/rest-apis#authentication, the token expires in exactly 10 minutes
+
+            return access_token
+
+    def format_start_end(self, offset, duration):
+        import isodate
+        from isodate.isoduration import duration_isoformat
+        from datetime import datetime, timedelta
+        delta_offset = isodate.parse_duration(offset)
+        delta_duration = isodate.parse_duration(duration)
+        start = delta_offset
+        end = delta_offset+delta_duration
+        return duration_isoformat(start, "%H:%M:%S") + " --> " + duration_isoformat(end, "%H:%M:%S")
+
+    def clean_string(self, string):
+        import re
+        return re.sub("\n{2,}","\n",string)
+        
+        
+    def to_sub_rip(self, content):
+        return [str(i) + "\n" + self.format_start_end(p['offset'],p['duration']) + "\n" + self.clean_string(p['nBest'][0]['display']) + "\n\n" for i,p in enumerate(content)]
+    
+    def recognize_azure_transcription(self, audio_file_name, key, blob_connection_string, blob_location, language="en-US", profanity="masked", location="westus", show_all=False, debug=False, cleanup=False):
+        """
+        Performs speech recognition on audio_file_name using the Microsoft Azure speech to text transcription service, which is asynchronous.
+        key is the API key for the service.
+        blob_connection_string is a connection string for writing to a blob.  This function gets a SAS token to allow it to write to the blob.
+        blob_location is a URL to a location that can be written with the SAS token generated using the connection string.
+        """
+
+        #Get a SAS token
+        from azure.storage.blob import BlobServiceClient, ResourceTypes, AccountSasPermissions, generate_account_sas
+        from datetime import datetime, timedelta
+        bsc=BlobServiceClient.from_connection_string(blob_connection_string)
+        sas_token=generate_account_sas(bsc.account_name, account_key=bsc.credential.account_key,
+                                       resource_types=ResourceTypes(object=True),
+                                       permission=AccountSasPermissions(read=True, write=True, list=True),
+                                       expiry=datetime.utcnow()+timedelta(hours=2))
+
+        #Send the audio file
+        [container,path]=blob_location.split('/',1)
+        blob_file_name = os.path.basename(audio_file_name)
+        container_client = bsc.get_container_client(container.rstrip(":"))
+        blob_client=container_client.get_blob_client(path + "/" + blob_file_name)
+        with open(audio_file_name, "rb") as data:
+            blob_client.upload_blob(data, blob_type="BlockBlob")
+        uploaded_audio_url=blob_client.url
+        
+        try:
+            #Start the transcription
+            access_token=self.get_azure_access_token(key, location)
+            request_body={"contentUrls": [uploaded_audio_url + "?" + sas_token],
+                          "locale": language,
+                          "displayName": blob_file_name,
+                          "model": None,
+                          "properties": {},
+                          }
+            logger.info("{}".format(request_body))
+            transcription_url="https://"+location+".api.cognitive.microsoft.com/speechtotext/v3.0/transcriptions"
+    
+            if cleanup:
+                old_jobs = self.url_get(transcription_url, headers={"Ocp-Apim-Subscription-Key":key})
+                for url in [j["self"] for j in old_jobs["values"]]:
+                    logger.info("Cleaning up {}".format(url))
+                    self.url_get(url, headers={"Ocp-Apim-Subscription-Key":key}, method='DELETE',
+                                 return_fn=lambda r:r.status_code<400)
+
+            job = self.url_get(transcription_url, body=request_body, method='POST',
+                               headers={"Content-Type": "application/json",
+                                        "Ocp-Apim-Subscription-Key":key})
+            if not('self' in job):
+                raise RequestError("Transcription could not be created: {}".format(json.dumps(job)))
+
+            
+            try:
+                #Wait for completion
+                done_statuses = {"Succeeded", "Failed"}
+                while(job['status'] not in done_statuses):
+                    logger.info("Job {} status: {}".format(job['self'],job['status']))
+                    time.sleep(30)
+                    job = self.url_get(job['self'], headers={"Ocp-Apim-Subscription-Key":key})
+
+                logger.info("Job {} status: {}".format(job['self'],job['status']))
+
+                if job['status']=="Succeeded":
+                    files_url = job['links']['files']
+                    files = self.url_get(files_url, headers={"Ocp-Apim-Subscription-Key":key})
+                    if "values" in files:
+                        transcriptions = [f["links"]["contentUrl"] for f in files["values"] if f["kind"]=="Transcription"]
+                        logger.info("Job {} transcription count: {}".format(job['self'],len(transcriptions)))
+                        transcription = transcriptions[0]
+                        content = self.url_get(transcription, headers={"Ocp-Apim-Subscription-Key":key})
+                        if debug:
+                            with open("debug_{}.json".format(blob_file_name),"w") as f:
+                                json.dump(content,f)
+                        return self.to_sub_rip(content['recognizedPhrases'])
+                    else:
+                        raise RequestError("No output files from transcription job")
+                else:
+                    raise RequestError("transcription request eventually failed")
+            finally:
+                self.url_get(job['self'], method='DELETE', headers={"Ocp-Apim-Subscription-Key":key},
+                             return_fn=lambda r:r.status_code<400)
+        finally:
+            #Delete to audio file blob
+            blob_client.delete_blob()
+
+
+
+    def recognize_azure(self, audio_data, key, language="en-US", profanity="masked", location="westus", show_all=False, debug=False):
+        """
+        Performs speech recognition on ``audio_data`` (an ``AudioData`` instance), using the Microsoft Azure short Speech-to-Text API.
+
+        The Microsoft Azure Speech API key is specified by ``key``. Unfortunately, these are not available without `signing up for an account <https://azure.microsoft.com/en-ca/pricing/details/cognitive-services/speech-api/>`__ with Microsoft Azure.
+
+        To get the API key, go to the `Microsoft Azure Portal Resources <https://portal.azure.com/>`__ page, go to "All Resources" > "Add" > "See All" > Search "Speech > "Create", and fill in the form to make a "Speech" resource. On the resulting page (which is also accessible from the "All Resources" page in the Azure Portal), go to the "Show Access Keys" page, which will have two API keys, either of which can be used for the `key` parameter. Microsoft Azure Speech API keys are 32-character lowercase hexadecimal strings.
+
+        The recognition language is determined by ``language``, a BCP-47 language tag like ``"en-US"`` (US English) or ``"fr-FR"`` (International French), defaulting to US English. A list of supported language values can be found in the `API documentation <https://docs.microsoft.com/en-us/azure/cognitive-services/speech/api-reference-rest/bingvoicerecognition#recognition-language>`__ under "Interactive and dictation mode".
+
+        Returns the most likely transcription if ``show_all`` is false (the default). Otherwise, returns the `raw API response <https://docs.microsoft.com/en-us/azure/cognitive-services/speech/api-reference-rest/bingvoicerecognition#sample-responses>`__ as a JSON dictionary.
+
+        Raises a ``speech_recognition.UnknownValueError`` exception if the speech is unintelligible. Raises a ``speech_recognition.RequestError`` exception if the speech recognition operation failed, if the key isn't valid, or if there is no internet connection.
+        """
+        assert isinstance(audio_data, AudioData), "Data must be audio data"
+        assert isinstance(key, str), "``key`` must be a string"
+        # assert isinstance(result_format, str), "``format`` must be a string" # simple|detailed
+        assert isinstance(language, str), "``language`` must be a string"
+
+        result_format = 'detailed'
+        access_token = self.get_azure_access_token(key, location)
 
         wav_data = audio_data.get_wav_data(
             convert_rate=16000,  # audio samples must be 8kHz or 16 kHz
@@ -1132,6 +1266,8 @@ class Recognizer(AudioSource):
         # return results
         #print('result:')
         #pprint(result, indent=4)
+        if debug:
+            pprint(result, indent=4, stream=sys.stderr)
         if show_all:
             return result
         if "RecognitionStatus" not in result or result["RecognitionStatus"] != "Success" or "NBest" not in result:
