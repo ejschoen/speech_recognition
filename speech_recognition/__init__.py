@@ -4,6 +4,7 @@
 
 import io
 import os
+import re
 import sys
 import subprocess
 import wave
@@ -1102,17 +1103,22 @@ class Recognizer(AudioSource):
             return access_token
 
     def clean_string(self, string):
-        import re
         return re.sub("\n{2,}","\n",string)
         
         
     def to_sub_rip(self, content):
         import isodate
-        return [{"index"  : i+1,
-                 "start"  : isodate.parse_duration(p['offset']),
-                 "end"    : isodate.parse_duration(p['offset'])+isodate.parse_duration(p['duration']),
-                 "caption": self.clean_string(p['nBest'][0]['display'])}
-                for i,p in enumerate(content)]
+        from itertools import groupby
+        channels = sorted({p['channel'] for p in content})
+
+        return [{"channel": channel,
+                 "phrases": [{"index"      : i+1,
+                              "start"      : isodate.parse_duration(p['offset']),
+                              "end"        : isodate.parse_duration(p['offset'])+isodate.parse_duration(p['duration']),
+                              "confidence" : p['nBest'][0]['confidence'],
+                              "caption"    : self.clean_string(p['nBest'][0]['display'])}
+                 for i,p in enumerate([p for p in content if p['channel']==channel])]}
+                for channel in channels]
     
     def recognize_azure_transcription(self, audio_file_name, key, blob_connection_string, blob_location, language="en-US", profanity="masked", location="westus", show_all=False, debug=False, cleanup=False):
         """
@@ -1120,8 +1126,14 @@ class Recognizer(AudioSource):
         key is the API key for the service.
         blob_connection_string is a connection string for writing to a blob.  This function gets a SAS token to allow it to write to the blob.
         blob_location is a URL to a location that can be written with the SAS token generated using the connection string.
+        For debugging without wasting time or money.  Pass in a prior result saved when debug=True as the audio_file_name, ending in .json.
         """
 
+        if (re.match(r".+\.json",os.path.basename(audio_file_name))):
+            with open(audio_file_name,"r") as f:
+                content = json.load(f)
+                return self.to_sub_rip(content['recognizedPhrases'])
+            
         #Get a SAS token
         from azure.storage.blob import BlobServiceClient, ResourceTypes, AccountSasPermissions, generate_account_sas
         from datetime import datetime, timedelta
