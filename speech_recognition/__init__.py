@@ -1101,23 +1101,18 @@ class Recognizer(AudioSource):
 
             return access_token
 
-    def format_start_end(self, offset, duration):
-        import isodate
-        from isodate.isoduration import duration_isoformat
-        from datetime import datetime, timedelta
-        delta_offset = isodate.parse_duration(offset)
-        delta_duration = isodate.parse_duration(duration)
-        start = delta_offset
-        end = delta_offset+delta_duration
-        return duration_isoformat(start, "%H:%M:%S") + " --> " + duration_isoformat(end, "%H:%M:%S")
-
     def clean_string(self, string):
         import re
         return re.sub("\n{2,}","\n",string)
         
         
     def to_sub_rip(self, content):
-        return [str(i) + "\n" + self.format_start_end(p['offset'],p['duration']) + "\n" + self.clean_string(p['nBest'][0]['display']) + "\n\n" for i,p in enumerate(content)]
+        import isodate
+        return [{"index"  : i+1,
+                 "start"  : isodate.parse_duration(p['offset']),
+                 "end"    : isodate.parse_duration(p['offset'])+isodate.parse_duration(p['duration']),
+                 "caption": self.clean_string(p['nBest'][0]['display'])}
+                for i,p in enumerate(content)]
     
     def recognize_azure_transcription(self, audio_file_name, key, blob_connection_string, blob_location, language="en-US", profanity="masked", location="westus", show_all=False, debug=False, cleanup=False):
         """
